@@ -1,14 +1,17 @@
 import joblib
 import os
-import streamlit as st
+
 import pandas as pd
+import streamlit as st
+
 from modules.feature_extraction import extract_features_for_pair
-from modules.data_handler import load_ontology, load_authors_list
+
 
 @st.cache_resource
 def load_model(model_choice, selected_db, _onto_data=None, _review_year=None):
-    print("Bắt đầu load_model")
-    # Import torch và nn bên trong hàm để tránh lỗi scope với cache
+    """Load a trained model for the selected database and model type."""
+    print("Starting load_model")
+
     try:
         import torch
         import torch.nn as nn
@@ -18,60 +21,47 @@ def load_model(model_choice, selected_db, _onto_data=None, _review_year=None):
         nn = None
         torch_ok = False
 
-    """
-    Tải mô hình học máy đã được huấn luyện dựa trên lựa chọn của người dùng
-    và bộ dữ liệu đã chọn.
-    Bổ sung logic tải riêng cho mô hình MLP (PyTorch).
-    """
-    # Ánh xạ tên mô hình trên giao diện với tên file tương ứng, tùy thuộc vào bộ dữ liệu
-
     MODEL_FILES = {
         "Aminer": {
             "Logistic Regression (LR)": "logistic_regression_model11989A465-prob.pkl",
             "Decision Tree (DT)": "DecisionTreeClassifier_model1989A465-prob.pkl",
             "Random Forest (RF)": "RandomForestClassifier1-1989A465-prob.pkl",
             "Multi-Layer Perceptron (MLP)": "mlp_model_aminer.pth",
-            "Graph Convolutional Netwwork (GCN)": "gcn_model_aminer.pkl",
-            #"Mô hình học máy đơn giản": "simple_ml_model_aminer.pkl",
+            "Graph Convolutional Network (GCN)": "gcn_model_aminer.pkl",
         },
         "Mendeley": {
             "Logistic Regression (LR)": "logistic_regression_model2019A5-prob.pkl",
             "Decision Tree (DT)": "DecisionTreeClassifier_model2019A5-prob.pkl",
             "Random Forest (RF)": "RandomForestClassifier-2019A5-prob.pkl",
-            "Multi-Layer Perceptron (MLP)": "mlp_model_mendeley.pth", # Giả định đây là .pth, đổi tên trong file mapping nếu cần
-            "Graph Convolutional Netwwork (GCN)": "gcn_model_mendeley.pkl",
-            #"Mô hình học máy đơn giản": "simple_ml_model_mendeley.pkl",
+            "Multi-Layer Perceptron (MLP)": "mlp_model_mendeley.pth",
+            "Graph Convolutional Network (GCN)": "gcn_model_mendeley.pkl",
         },
     }
+
     model_name = MODEL_FILES.get(selected_db, {}).get(model_choice)
     if not model_name:
-        st.warning(f"Mô hình '{model_choice}' chưa được hỗ trợ cho bộ dữ liệu '{selected_db}'.")
+        st.warning(f"The model '{model_choice}' is not supported for database '{selected_db}'.")
         return None
 
-    model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'models', model_name))
-
+    model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", model_name))
     if not os.path.exists(model_path):
-        st.error(f"Không tìm thấy file mô hình tại đường dẫn: {model_path}")
+        st.error(f"Model file not found at: {model_path}")
         return None
 
     if model_choice == "Multi-Layer Perceptron (MLP)":
         if not torch_ok:
-            st.error("Không thể tải MLP. PyTorch không được cài đặt.")
+            st.error("Could not load MLP because PyTorch is not installed.")
             return None
 
-        # Định nghĩa class MLP và PyTorchMLPWrapper bên trong hàm
         class MLP(nn.Module):
             def __init__(self, input_size):
-                super(MLP, self).__init__()
+                super().__init__()
                 self.model = nn.Sequential(
-                    nn.Linear(input_size, 128),
-                    nn.ReLU(),
-                    nn.Dropout(0.3),
-                    nn.Linear(128, 64),
-                    nn.ReLU(),
-                    nn.Dropout(0.3),
-                    nn.Linear(64, 2)
+                    nn.Linear(input_size, 128), nn.ReLU(), nn.Dropout(0.3),
+                    nn.Linear(128, 64), nn.ReLU(), nn.Dropout(0.3),
+                    nn.Linear(64, 2),
                 )
+
             def forward(self, x):
                 return self.model(x)
 
@@ -80,50 +70,45 @@ def load_model(model_choice, selected_db, _onto_data=None, _review_year=None):
                 self.model = model_instance
                 self.model.eval()
                 self.input_size = input_size
+
             def predict_proba(self, features_df):
                 if features_df.shape[1] != self.input_size:
-                    st.error(f"Kích thước đặc trưng đầu vào không khớp: {features_df.shape[1]} (thực tế) vs {self.input_size} (yêu cầu)")
+                    st.error(f"Feature input size mismatch: {features_df.shape[1]} received; {self.input_size} required")
                     return torch.tensor([[0.0, 0.0]]).numpy()
                 features_tensor = torch.tensor(features_df.values, dtype=torch.float32)
                 with torch.no_grad():
-                    output = self.model(features_tensor)
-                    probabilities = torch.softmax(output, dim=1).numpy()
+                    probabilities = torch.softmax(self.model(features_tensor), dim=1).numpy()
                 return probabilities
 
         try:
-            INPUT_FEATURE_SIZE = 6
-            # Allowlist class MLP for safe loading
+            input_feature_size = 6
             try:
                 import torch.serialization
                 torch.serialization.add_safe_globals([MLP])
-            except Exception as e:
-                st.warning(f"Không thể allowlist class MLP: {e}")
+            except Exception as exc:
+                st.warning(f"Could not allowlist the MLP class: {exc}")
+
             try:
-                checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
-            except Exception as e:
-                st.warning(f"Thử tải mô hình với weights_only=False thất bại: {e}. Đang thử lại với weights_only=True.")
-                checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=True)
-            model_instance = None
+                checkpoint = torch.load(model_path, map_location=torch.device("cpu"), weights_only=False)
+            except Exception as exc:
+                st.warning(f"Loading with weights_only=False failed: {exc}. Retrying with weights_only=True.")
+                checkpoint = torch.load(model_path, map_location=torch.device("cpu"), weights_only=True)
+
             if isinstance(checkpoint, nn.Module):
                 model_instance = checkpoint
-                # st.info("Đã tải mô hình MLP (PyTorch) đầy đủ.")
             else:
-                model_instance = MLP(input_size=INPUT_FEATURE_SIZE)
-                if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-                    model_instance.load_state_dict(checkpoint['state_dict'])
-                    # st.info("Đã tải state_dict của MLP (PyTorch) từ dict.")
-                else:
-                    model_instance.load_state_dict(checkpoint)
-                    # st.info("Đã tải state_dict của MLP (PyTorch).")
-            model = PyTorchMLPWrapper(model_instance, INPUT_FEATURE_SIZE)
-            # st.success("Tải mô hình MLP hoàn tất.")
-            return model
-        except Exception as e:
-            st.error(f"Đã xảy ra lỗi khi tải mô hình PyTorch: {e}. Vui lòng kiểm tra lại cấu trúc lớp MLP và cách lưu file .pth.")
+                model_instance = MLP(input_size=input_feature_size)
+                state_dict = checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
+                model_instance.load_state_dict(state_dict)
+
+            return PyTorchMLPWrapper(model_instance, input_feature_size)
+        except Exception as exc:
+            st.error(f"Could not load the PyTorch model: {exc}. Please check the MLP structure and .pth file.")
             return None
-    elif model_choice == "Graph Convolutional Netwwork (GCN)":
+
+    if model_choice == "Graph Convolutional Network (GCN)":
         if not torch_ok:
-            st.error("Không thể tải GCN. PyTorch không được cài đặt.")
+            st.error("Could not load GCN because PyTorch is not installed.")
             return None
 
         class GCN(nn.Module):
@@ -134,118 +119,108 @@ def load_model(model_choice, selected_db, _onto_data=None, _review_year=None):
                 self.conv2 = GCNConv(hidden_channels, out_channels)
 
             def forward(self, x, edge_index):
-                x = self.conv1(x, edge_index)
-                x = torch.relu(x)
-                x = self.conv2(x, edge_index)
-                return x
+                x = torch.relu(self.conv1(x, edge_index))
+                return self.conv2(x, edge_index)
 
         class GCNWrapper:
-            def __init__(self, model, in_channels, hidden_channels, out_channels, onto_data, review_year):
+            def __init__(self, model, in_channels, hidden_channels, out_channels, ontology, review_year):
                 self.model = model
                 self.in_channels = in_channels
                 self.hidden_channels = hidden_channels
                 self.out_channels = out_channels
                 self.model.eval()
-                self.onto_data = onto_data
+                self.ontology = ontology
                 self.review_year = review_year
 
             def predict_proba(self, features_df):
-                # features_df phải chứa thông tin tên hai tác giả
-                if hasattr(features_df, "author_names_pair"):
-                    author_A, author_B = features_df.author_names_pair
-                else:
-                    st.error("GCNWrapper: Không truyền được tên hai tác giả cho dự đoán.")
+                if not hasattr(features_df, "author_names_pair"):
+                    st.error("GCNWrapper: The names of the two authors were not provided for prediction.")
                     return torch.tensor([[0.0, 0.0]]).numpy()
-                # Tính đặc trưng cho từng node (tác giả)
-                from modules.feature_extraction import extract_features_for_pair
-                node_A = extract_features_for_pair(self.onto_data, author_A, author_A, self.review_year, model_type="MLP")
-                node_B = extract_features_for_pair(self.onto_data, author_B, author_B, self.review_year, model_type="MLP")
-                if node_A is None or node_B is None:
-                    st.error("GCNWrapper: Không thể trích xuất đặc trưng cho hai tác giả.")
+
+                author_a, author_b = features_df.author_names_pair
+                node_a = extract_features_for_pair(self.ontology, author_a, author_a, self.review_year, model_type="MLP")
+                node_b = extract_features_for_pair(self.ontology, author_b, author_b, self.review_year, model_type="MLP")
+                if node_a is None or node_b is None:
+                    st.error("GCNWrapper: Could not extract features for both authors.")
                     return torch.tensor([[0.0, 0.0]]).numpy()
-                x = torch.tensor(pd.concat([node_A, node_B]).values, dtype=torch.float32)
-                # Tạo edge_index cho 2 node
+
+                x = torch.tensor(pd.concat([node_a, node_b]).values, dtype=torch.float32)
                 edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
                 with torch.no_grad():
-                    out = self.model(x, edge_index)
-                    combined = out[0] + out[1]
-                    prob = torch.softmax(combined, dim=0).numpy()
-                    return prob.reshape(1, -1)
+                    combined = torch.softmax(self.model(x, edge_index)[0] + self.model(x, edge_index)[1], dim=0).numpy()
+                return combined.reshape(1, -1)
 
         try:
-            checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
+            checkpoint = torch.load(model_path, map_location=torch.device("cpu"))
             in_channels = checkpoint.get("in_channels", 6)
             hidden_channels = checkpoint.get("hidden_channels", 32)
             out_channels = checkpoint.get("out_channels", 2)
             model = GCN(in_channels, hidden_channels, out_channels)
             model.load_state_dict(checkpoint["state_dict"])
-            # Sử dụng _onto_data và _review_year truyền từ app.py
+
             if _onto_data is None or _review_year is None:
-                st.error("Cần truyền _onto_data và _review_year vào load_model khi dùng GCN.")
+                st.error("GCN prediction requires ontology data and a review year.")
                 return None
-            wrapper = GCNWrapper(model, in_channels, hidden_channels, out_channels, _onto_data, _review_year)
-            # st.success("Tải mô hình GCN hoàn tất.")
-            return wrapper
-        except Exception as e:
-            st.error(f"Đã xảy ra lỗi khi tải mô hình GCN: {e}. Vui lòng kiểm tra lại file mô hình GCN.")
-            return None
-    else:
-        try:
-            model = joblib.load(model_path)
-            # st.success(f"Đã tải mô hình {model_choice} (Joblib) thành công.")
-            return model
-        except Exception as e:
-            st.error(f"Đã xảy ra lỗi khi tải mô hình (joblib): {e}")
+
+            return GCNWrapper(model, in_channels, hidden_channels, out_channels, _onto_data, _review_year)
+        except Exception as exc:
+            st.error(f"Could not load the GCN model: {exc}. Please check the GCN model file.")
             return None
 
-# Lưu ý: Hàm suggest_collaborators không cần thay đổi vì nó gọi predict_link_prob,
-# và predict_link_prob giờ đã hoạt động với cả hai loại mô hình.
+    try:
+        return joblib.load(model_path)
+    except Exception as exc:
+        st.error(f"Could not load the model with joblib: {exc}")
+        return None
+
 
 def predict_link_prob(features_df, model):
-    """
-    Sử dụng mô hình đã nạp để dự đoán xác suất cộng tác.
-    """
+    """Use the loaded model to predict the collaboration probability."""
     try:
-        if not hasattr(model, 'predict_proba'):
-            st.error("Mô hình được chọn không hỗ trợ dự đoán xác suất (predict_proba).")
+        if not hasattr(model, "predict_proba"):
+            st.error("The selected model does not support probability prediction (predict_proba).")
             return 0.0
-        prob = model.predict_proba(features_df)[:, 1][0]
-        return float(prob)
-    except Exception as e:
-        st.error(f"Đã xảy ra lỗi khi dự đoán: {e}")
+        return float(model.predict_proba(features_df)[:, 1][0])
+    except Exception as exc:
+        st.error(f"An error occurred during prediction: {exc}")
         return 0.0
 
+
 def suggest_collaborators(search_author_name, model, author_names, onto_data, review_year, num_suggestions=20):
-    """
-    Sử dụng mô hình học máy đã chọn để gợi ý các cộng tác viên tiềm năng.
-    """
+    """Use the selected machine-learning model to suggest potential collaborators."""
     if not author_names or not model:
         return pd.DataFrame()
-    
+
     suggestions = []
     model_type = "GCN" if hasattr(model, "in_channels") else ""
+
     for other_author in author_names:
         if other_author == search_author_name:
             continue
-        # Trích xuất đặc trưng cho cặp tác giả
-        features_df = extract_features_for_pair(onto_data, search_author_name, other_author, review_year, model_type=model_type)
+
+        features_df = extract_features_for_pair(
+            onto_data,
+            search_author_name,
+            other_author,
+            review_year,
+            model_type=model_type,
+        )
         if features_df is not None:
-            # Gắn tên cặp vào DataFrame để GCNWrapper dùng (dùng setattr để tránh lỗi gán thuộc tính động)
             if model_type == "GCN":
                 setattr(features_df, "author_names_pair", (search_author_name, other_author))
-            prob = predict_link_prob(features_df, model)
+            probability = predict_link_prob(features_df, model)
             suggestions.append({
-                "Tên Tác giả": other_author,
-                "Xác suất cộng tác": prob
+                "Author Name": other_author,
+                "Collaboration Probability": probability,
             })
 
-    # Tạo DataFrame, sắp xếp và lấy top N
     suggestions_df = pd.DataFrame(suggestions)
     if not suggestions_df.empty:
         suggestions_df = suggestions_df.sort_values(
-            by="Xác suất cộng tác",
-            ascending=False
+            by="Collaboration Probability",
+            ascending=False,
         ).head(num_suggestions).reset_index(drop=True)
-        # Định dạng xác suất dưới dạng phần trăm
-        suggestions_df['Xác suất cộng tác'] = suggestions_df['Xác suất cộng tác'].apply(lambda x: f"{x*100:.2f}%")
+        suggestions_df["Collaboration Probability"] = suggestions_df["Collaboration Probability"].apply(
+            lambda value: f"{value * 100:.2f}%"
+        )
     return suggestions_df
