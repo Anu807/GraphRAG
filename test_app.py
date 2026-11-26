@@ -1,4 +1,4 @@
 import streamlit as st
 
 st.title("Test Streamlit App")
-st.write("Nếu chị thấy dòng này thì môi trường Streamlit hoạt động OK.")
+st.write("If you see this line, the Streamlit environment is working correctly.")
